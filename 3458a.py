@@ -8,10 +8,12 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import pyqtSlot
 from PyQt5.QtGui import (QColor, QBrush)
 import time
+from datetime import datetime
 import threading
 from PyQt5.QtChart import *
 from collections import deque
 import numpy as np
+import json
 
 class CollectThread(threading.Thread):
     def __init__(self, win):
@@ -28,6 +30,25 @@ class CollectThread(threading.Thread):
         self.pid = None
         self.terminated = False
         self.cmd_queue = deque([])
+        try:
+            f = open("3458a.csv", "rb+")
+            for line in f:
+                arr = line.decode('utf-8')[:-1].split(",")
+                if arr[0] == "\"Time\"":
+                    continue
+                # ts = datetime.datetime.strptime(arr[1], "%Y-%m-%d %H:%i:%s")
+                self.win.meas_data.append(float(arr[1]))
+                self.win.meas_meta.append({
+                    "time": datetime.strptime(arr[0], "\"%Y-%m-%d %H:%M:%S.%f\"").time(),
+                    "temp": float(arr[2]) if len(arr) >= 3 else 40
+                })
+            f.close()
+        except Exception as e:
+            print("Read error: ",e)
+            pass
+
+        self.f_record = open("3458a.csv", "a+")
+        self.f_record.write("\"Time\",\"Meassure\"\n")
 
     def run(self):
         self.rm = visa.ResourceManager("@ni")
@@ -43,15 +64,32 @@ class CollectThread(threading.Thread):
 
             if self.dev is not None and not self.win.initalizing:
                 try:
+                    if self.win.state['acal_temp'] is None:
+                        self.dev.write("TEMP?")
+                        self.win.state["acal_temp"] = float(self.dev.read().strip())                        
+                        f = open("3458a_state.json", "w+")
+                        f.write(json.dumps(self.win.state))
+                        f.close()
+
                     while len(self.cmd_queue) > 0:
                         rcmd = self.cmd_queue.popleft()
-                        print(rcmd)
                         self.dev.write(rcmd)
 
                     if self.win.state['TRIG'] != '4':
                         # self.dev.write(" ")
-                        self.win.meas = float(self.dev.read().strip())
-                        self.win.meas_data.append(self.win.meas)
+                        if time.time() - self.win.state["cur_temp_date"] >= 15:
+                            self.dev.write("TEMP?")
+                            self.win.state["cur_temp"] = float(self.dev.read().strip())
+                            self.win.state["cur_temp_date"] = time.time()
+                        meas_val = float(self.dev.read().strip())
+                        self.f_record.write("\"%s\",%.08f,%0.2f\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), meas_val,self.win.state["cur_temp"]))
+                        self.f_record.flush()
+                        self.win.meas = meas_val
+                        self.win.meas_data.append(meas_val)
+                        self.win.meas_meta.append({
+                            "time": time.time(),
+                            "temp": self.win.state["cur_temp"]
+                            })
                     
                     # time.sleep(0.5)
                 except Exception as e:
@@ -73,23 +111,29 @@ class InstChart(QChartView):
     def mouseMoveEvent(self, event):
         xyVal = self.chart().mapToValue(event.pos())
 
-        if xyVal.x() > 0 and int(xyVal.x()) < self.chart().series()[0].count():
-            dataPos = self.chart().mapToPosition(QPointF(int(xyVal.x()), self.meas_data[int(xyVal.x())]))
+        try:
+            x_start = self.chart().mapToValue(QPointF(self.chart().plotArea().left(),0)).x()
+            x_end = self.chart().mapToValue(QPointF(self.chart().plotArea().right(),0)).x()
+            
+            if xyVal.x() > x_start and xyVal.x() <= x_end:
+                dataPos = self.chart().mapToPosition(QPointF(int(xyVal.x()), self.meas_data[int(xyVal.x())]))
 
-            self.m_coordX.setPos(dataPos.x() + 5, dataPos.y() + 5)
-            self.m_coordX.setText("%g, %f" % (int(xyVal.x()), self.meas_data[int(xyVal.x())]))
+                self.m_coordX.setPos(dataPos.x() + 5, dataPos.y() + 5)
+                self.m_coordX.setText("%g, %f" % (int(xyVal.x()), self.meas_data[int(xyVal.x())]))
 
-            # #get axis min, max value to calculate position
-            # self.min_x, self.min_y = self.chart().AxisX().min(), self.chart().yAxis().min()
-            # self.max_x, self.max_y = self.chart().AxisX().max(), self.chart().yAxis().max()
+                # #get axis min, max value to calculate position
+                # self.min_x, self.min_y = self.chart().AxisX().min(), self.chart().yAxis().min()
+                # self.max_x, self.max_y = self.chart().AxisX().max(), self.chart().yAxis().max()
 
-            # self.point_bottom = self.chart().mapToPosition(QPointF(self.min_x, self.min_y))
-            # self.point_top = self.chart().mapToPosition(QPointF(self.min_x, self.max_y))
+                # self.point_bottom = self.chart().mapToPosition(QPointF(self.min_x, self.min_y))
+                # self.point_top = self.chart().mapToPosition(QPointF(self.min_x, self.max_y))
 
-            line = self.lineItem.line()
-            line.setLine(dataPos.x(), self.chart().plotArea().top(), dataPos.x(), self.chart().plotArea().bottom() )
-            self.lineItem.setLine(line)
-            # print(event, self.m_coordX)
+                line = self.lineItem.line()
+                line.setLine(dataPos.x(), self.chart().plotArea().top(), dataPos.x(), self.chart().plotArea().bottom() )
+                self.lineItem.setLine(line)
+                # print(event, self.m_coordX)
+        except Exception as e:
+            return
 
     @pyqtSlot()
     def wheelEvent(self, event):
@@ -105,6 +149,19 @@ class InstChart(QChartView):
         self.chart().zoomIn(r)
         delta = self.chart().plotArea().center() -mousePos
         self.chart().scroll(delta.x(),0)
+        x_start = round(self.chart().mapToValue(QPointF(self.chart().plotArea().left(),0)).x())
+        x_end = round(self.chart().mapToValue(QPointF(self.chart().plotArea().right(),0)).x())
+        if x_start < 0:
+            x_start = 0
+        if x_end >= len(self.meas_data):
+            x_end = len(self.meas_data)-1
+        x_end += 1
+        try:
+            span = max(self.meas_data[x_start:x_end]) - min(self.meas_data[x_start:x_end])
+            self.chart().axes(Qt.Vertical)[0].setRange(min(self.meas_data[x_start:x_end]) - span * 0.01,max(self.meas_data[x_start:x_end]) + span * 0.01)
+        except Exception as e:
+            pass
+
         # print("Wheel Event")
         # self.chart().zoom(0.5 if event.angleDelta().y() > 0 else 2.0)
         event.accept()
@@ -125,8 +182,6 @@ class InstChart(QChartView):
 class SigSlot(QWidget):
     def __init__(self,parent=None):
         QWidget.__init__(self)
-        self.comm_th = CollectThread(self)
-        self.comm_th.start()
         
         self.meas = None
         self.dev = None
@@ -134,7 +189,10 @@ class SigSlot(QWidget):
         self.meas_count = 0
         self.state = {}
         self.initalizing = True
-        # self.meas_data = []
+        self.meas_data = []
+        self.meas_meta = []
+        self.comm_th = CollectThread(self)
+        self.comm_th.start()
 
         self.setWindowTitle('Keysight 3458A')
 
@@ -198,6 +256,17 @@ class SigSlot(QWidget):
             self.opt_math.currentTextChanged.connect(lambda:self.on_opt_changed("MATH", self.opt_math))
             opt_math.addWidget(self.opt_math)
             opt_selector.addLayout(opt_math)
+
+            opt_acal = QHBoxLayout()
+            opt_acal.addWidget(QLabel("ACAL:", self))
+            self.opt_acal = QComboBox(self)
+            self.opt_acal.addItems(["ALL", "DCV", "AC", "OHMS"])
+            # self.opt_math.currentTextChanged.connect(lambda:self.on_opt_changed("MATH", self.opt_math))
+            self.btn_acal = QPushButton('ACAL', self)
+            self.btn_acal.clicked.connect(self.on_btn_acal_clicked)
+            opt_acal.addWidget(self.opt_acal)
+            opt_acal.addWidget(self.btn_acal)
+            opt_selector.addLayout(opt_acal)
         
 
         # CHART
@@ -212,13 +281,15 @@ class SigSlot(QWidget):
         # self.series_1.append(self._1_point_list) #折线添加坐标点清单
         self.series_data_cnt = 500
         # self.meas_data = deque([0] * self.series_data_cnt, maxlen=self.series_data_cnt)
-        self.meas_data = []
         self.series_1.append([QPointF(x, y) for x, y in enumerate(self.meas_data)])
-        self.series_1.setName("折线一")#折线命名
+        self.series_1.setName("Meassure")#折线命名
 
+        self.series_temp = QLineSeries()
+        self.series_temp.setName("Temperature")
+        self.series_temp.append([QPointF(x, y["temp"]) for x, y in enumerate(self.meas_meta)])
 
         self.x_Aix = QValueAxis()#定义x轴，实例化
-        self.x_Aix.setRange(0.00, self.series_data_cnt) #设置量程
+        # self.x_Aix.setRange(0.00, self.series_data_cnt) #设置量程
         # self.x_Aix.setLabelsVisible(False)
         # self.x_Aix.setFormatCondition("align", 60)
         # self.x_Aix.setLabelFormat("{value|hh:nn}")
@@ -234,18 +305,31 @@ class SigSlot(QWidget):
         self.y_Aix.setTickCount(7)
         self.y_Aix.setMinorTickCount(0)
 
+        self.yAxisTemp = QValueAxis()#定义y轴
+        self.yAxisTemp.setLabelFormat("%0.1f")
+        self.yAxisTemp.setTickCount(7)
+        self.yAxisTemp.setMinorTickCount(0)
+        # tempData = [y["temp"] for x, y in enumerate(self.meas_meta)]
+        # self.yAxisTemp.setRange(min(tempData) - 0.1, max(tempData) + 0.1)
+        # self.y_Aix.setRange(0.00,6.00)
+
         self.charView = InstChart(self)  #定义charView，父窗体类型为 Window
         self.charView.setGeometry(0,0,self.width(),self.height())  #设置charView位置、大小
         self.charView.meas_data = self.meas_data
-        # self.charView.mouseMoveEvent.connect(self.onMouseMovePlotArea)
 
         self.chart = self.charView.chart()
         self.chart.addSeries(self.series_1)
+        self.chart.addSeries(self.series_temp)
         self.chart.setAxisX(self.x_Aix, self.series_1) #设置x轴属性
         self.chart.setAxisY(self.y_Aix, self.series_1) #设置y轴属性
         self.chart.setAcceptHoverEvents(True)
+
+        self.chart.addAxis(self.yAxisTemp, Qt.AlignRight)
+        self.series_temp.attachAxis(self.x_Aix)
+        self.series_temp.attachAxis(self.yAxisTemp)
+        self.yAxisTemp.setLinePenColor(self.series_temp.pen().color())
+        # self.chart.setAxisY(self.yAxisTemp, self.series_temp)
         self.chart.legend().hide()
-        # self.charView.hovered.connect(self.charView.onHovered)
 
         # self.charView.chart().addSeries(self.series_1)  #添加折线
         # self.charView.chart().setAxisX(self.x_Aix) #设置x轴属性
@@ -316,6 +400,12 @@ class SigSlot(QWidget):
             st_layout.addWidget(self.state_min)
             stat_selector.addLayout(st_layout)
 
+            st_layout = QHBoxLayout()
+            st_layout.addWidget(QLabel("Temp:", self))
+            self.state_acal_temp = QLabel("0.00", self)
+            st_layout.addWidget(self.state_acal_temp)
+            stat_selector.addLayout(st_layout)
+
             self.btn_clear = QPushButton('Clear', self)
             self.btn_clear.clicked.connect(self.on_btn_clear_clicked)
             stat_selector.addWidget(self.btn_clear)
@@ -352,8 +442,12 @@ class SigSlot(QWidget):
                 if self.charView.acceptUpdate:
                     self.charView.setUpdatesEnabled(False)
                     self.series_1.replace([QPointF(x, y) for x, y in enumerate(self.meas_data)])
+                    self.series_temp.replace([QPointF(x, y["temp"]) for x, y in enumerate(self.meas_meta)])
                     self.x_Aix.setRange(0,len(self.meas_data))
-                    self.y_Aix.setRange(min(self.meas_data),max(self.meas_data))
+                    span = max(self.meas_data) - min(self.meas_data)
+                    self.y_Aix.setRange(min(self.meas_data) - span * 0.01,max(self.meas_data) + span * 0.01)
+                    tempData = [y["temp"] for x, y in enumerate(self.meas_meta)]
+                    self.yAxisTemp.setRange(min(tempData) - 0.1, max(tempData) + 0.1)
                     self.charView.update()
                     self.charView.setUpdatesEnabled(True)
                     self.meas_count+=1
@@ -364,6 +458,7 @@ class SigSlot(QWidget):
                 self.state_sdev.setText("%.08f" % (np.std(self.meas_data)))
                 self.state_max.setText("%.08f" % (np.max(self.meas_data)))
                 self.state_min.setText("%.08f" % (np.min(self.meas_data)))
+                self.state_acal_temp.setText("%.03f (%.03f C)" % (self.state['acal_temp'], self.state['cur_temp'] - self.state['acal_temp']))
                 self.meas = None
             except Exception as e:
                 print("Display data failed: %s" % (str(e)))
@@ -390,6 +485,13 @@ class SigSlot(QWidget):
             self.dev.write("ID?")
             self.model = self.dev.read().strip()
             self.dev_id.setText(self.model)
+
+            try:
+                f = open("3458a_state.json", "r+")
+                self.state = json.loads(f.read())
+                f.close()
+            except Exception as e:
+                self.state = {}
 
             self.dev.write("NDIG?")
             self.state["NDIG"] = str(round(float(self.dev.read().strip())))
@@ -426,6 +528,18 @@ class SigSlot(QWidget):
                 math_index -= 1
             self.opt_math.setCurrentIndex(math_index)
 
+            if "acal_temp" not in self.state:
+                print("Get ACAL Temp")
+                self.dev.write("TEMP?")
+                self.state["acal_temp"] = float(self.dev.read().strip())
+                f = open("3458a_state.json", "w+")
+                f.write(json.dumps(self.state))
+                f.close()
+
+            self.dev.write("TEMP?")
+            self.state["cur_temp"] = float(self.dev.read().strip())
+            self.state["cur_temp_date"] = time.time()
+
             self.update_load_button()
             print(self.state)
 
@@ -461,6 +575,11 @@ class SigSlot(QWidget):
     @pyqtSlot()
     def on_btn_clear_clicked(self):
         self.meas_data.clear()
+
+    @pyqtSlot()
+    def on_btn_acal_clicked(self):
+        self.state['acal_temp'] = None
+        self.comm_th.cmd_queue.append("ACAL %s" % (self.opt_acal.currentText()))
 
     @pyqtSlot()
     def on_opt_changed(self, opt, obj):        
