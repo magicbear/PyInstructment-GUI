@@ -143,7 +143,7 @@ conductance_range_table = {
     "PLZ664WA":[92.4,9.24,0.924],
     "PLZ1004W":[139.9968,13.99968,1.399968]
 }
-class SigSlot(QWidget):
+class Kikusui(QWidget):
     def __init__(self,parent=None):
         QWidget.__init__(self)
         self.rm = visa.ResourceManager(visa_library="@ni")
@@ -751,12 +751,12 @@ class SigSlot(QWidget):
             elif event.key() == Qt.Key_Escape:
                 self.update_pulse_info()
         elif event.type() == QEvent.Enter and obj in [self.main_slider_value, self.pulse_freq_text, self.pulse_duty_text, self.pulse_level_text]:
-            rc = super(SigSlot, self).eventFilter(obj, event)
+            rc = super(Kikusui, self).eventFilter(obj, event)
             obj.setFocus()
             obj.selectAll()
             return rc
         #     print(obj)
-        return super(SigSlot, self).eventFilter(obj, event)
+        return super(Kikusui, self).eventFilter(obj, event)
 
     def update_load_button(self):
         if self.load_enabled == "0":
@@ -796,7 +796,8 @@ class SigSlot(QWidget):
         if e.key() == Qt.Key_F5:
             self.on_btn_load_clicked()
 
-app = QApplication(sys.argv)
-qb = SigSlot()
-qb.show()
-sys.exit(app.exec_())
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    qb = Kikusui()
+    qb.show()
+    sys.exit(app.exec_())
